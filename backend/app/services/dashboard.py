@@ -1,8 +1,15 @@
-"""监控大盘业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""监控大盘业务规则：状态流转、字段校验与数据服务响应快照消费都收在这里。
+
+大盘是数据服务的下游消费方：发布大盘与刷新大盘只读取已上线数据服务的当前契约，
+通过 DataserviceService.collect_published_snapshots 同步消费数据服务响应数据快照；
+服务下线后不再返回新结果。大盘侧只读消费，不修改契约与快照（职责归数据服务模块）。
+"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
+from app.services.dataservice import DataserviceService
 from app.store import store
 
 MODULE = "dashboard"
@@ -12,7 +19,15 @@ ACTION_RULES = {"提交大盘评审": "大盘评审中", "发布大盘": "已发
 NEGATIVE_ACTIONS = ["下线大盘"]
 
 
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 class DashboardService:
+    def __init__(self) -> None:
+        # 下游取数入口：数据服务模块提供的已发布契约快照消费口
+        self._dataservice = DataserviceService()
+
     def list_entries(
         self,
         *,
@@ -46,6 +61,23 @@ class DashboardService:
         rows.append(entry)
         return entry, []
 
+    def _consume_snapshots(self, entry: dict[str, Any]) -> str:
+        """读取已上线服务的当前契约并同步消费响应快照，把消费结果登记到大盘上。"""
+        consumed, skipped = self._dataservice.collect_published_snapshots()
+        entry["消费快照"] = consumed
+        entry["最近取数时间"] = _now()
+        message = f"同步消费 {len(consumed)} 份数据服务响应快照"
+        if consumed:
+            refs = "、".join(
+                f"{item['服务编号']}@契约v{item['契约版本']}({item['缓存签名']})"
+                for item in consumed
+            )
+            message += f"：{refs}"
+        if skipped:
+            reasons = "、".join(f"{item['服务编号']}（{item['原因']}）" for item in skipped)
+            message += f"；跳过 {len(skipped)} 个服务：{reasons}"
+        return message
+
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
         if entry is None:
@@ -58,4 +90,19 @@ class DashboardService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
-        return entry, f"大盘配置已{action}"
+        message = f"大盘配置已{action}"
+        if action == "发布大盘":
+            # 发布即取数：只读取已上线服务的当前契约，同步消费响应快照
+            message += "，" + self._consume_snapshots(entry)
+        return entry, message
+
+    def refresh_entry(self, entry_id: int) -> tuple[dict[str, Any] | None, str]:
+        """刷新大盘取数：只允许已发布大盘刷新，读取已上线服务的当前契约。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"大盘配置 {entry_id} 不存在或已归档"
+        if entry.get("status") != "已发布":
+            return None, (
+                f"大盘配置当前状态为「{entry.get('status')}」，只有已发布大盘才能刷新取数"
+            )
+        return entry, "大盘已刷新，" + self._consume_snapshots(entry)

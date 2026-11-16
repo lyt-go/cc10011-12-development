@@ -45,6 +45,7 @@ export default function DashboardView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [notice, setNotice] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
 
@@ -70,17 +71,36 @@ export default function DashboardView() {
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNotice('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ values: { action } }),
       })
-      if (!response.ok) {
-        throw new Error('监控大盘动作未生效，请稍后重试')
+      const payload = await response.json()
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.message ?? payload.detail ?? '监控大盘动作未生效，请稍后重试')
       }
+      setNotice(payload.message ?? '操作已完成')
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '监控大盘操作失败')
+    }
+  }
+
+  async function refreshDashboard(row: Row) {
+    setErrorMessage('')
+    setNotice('')
+    try {
+      const response = await request(`${ENDPOINT}/${row.id}/refresh`, { method: 'POST' })
+      const payload = await response.json()
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.message ?? payload.detail ?? '监控大盘刷新未生效，请稍后重试')
+      }
+      setNotice(payload.message ?? '大盘已刷新')
+      await reload()
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '监控大盘刷新失败')
     }
   }
 
@@ -142,6 +162,9 @@ export default function DashboardView() {
                     {action}
                   </button>
                 ))}
+                <button className="link" type="button" onClick={() => void refreshDashboard(row)}>
+                  刷新大盘
+                </button>
               </td>
             </tr>
           ))}
@@ -155,6 +178,7 @@ export default function DashboardView() {
 
       <footer className="page-foot">
         <span>共 {total} 条监控大盘记录</span>
+        {notice && <span>{notice}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>

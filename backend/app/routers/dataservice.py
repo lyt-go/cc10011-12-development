@@ -1,4 +1,9 @@
-"""数据服务接口：维护服务接口，覆盖提交服务评审、上线服务、下线服务等动作。"""
+"""数据服务接口：维护服务接口，覆盖提交服务评审、上线服务、下线服务、查询服务结果等动作。
+
+上线即冻结接口契约快照并生成缓存签名；查询结果落成数据服务响应数据快照，
+接口版本、返回字段与缓存签名都可追溯。静态子路径（contracts/snapshots/export）
+必须注册在 /{entry_id} 之前，否则会被路径参数抢先匹配。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +35,41 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/contracts", response_model=PageResult[dict])
+def list_contracts(
+    path: str | None = Query(default=None, description="按接口路径检索"),
+    status: str | None = Query(default=None, description="生效中、已失效"),
+    page: int = 1,
+    size: int = 20,
+) -> PageResult[dict]:
+    """接口契约快照列表：上线时冻结的路径、入参、返回字段、版本与缓存签名。"""
+    if size > 200:
+        raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
+    items, total = service.list_contracts(path=path, status=status, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/snapshots", response_model=PageResult[dict])
+def list_snapshots(
+    signature: str | None = Query(default=None, description="按缓存签名检索"),
+    path: str | None = Query(default=None, description="按接口路径检索"),
+    page: int = 1,
+    size: int = 20,
+) -> PageResult[dict]:
+    """数据服务响应数据快照列表：每份快照记录契约版本、返回字段与缓存签名。"""
+    if size > 200:
+        raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
+    items, total = service.list_snapshots(signature=signature, path=path, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出数据服务清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "dataservice", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条服务接口明细；不存在时给出可读的错误说明。"""
@@ -58,8 +98,13 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出数据服务清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "dataservice", "total": total, "items": items}
+@router.post("/{entry_id}/query")
+def query_entry(entry_id: int, payload: EntryPayload) -> dict[str, Any]:
+    """查询数据服务结果：读取已发布数据集与当前生效契约，生成或复用响应数据快照。
+
+    重复提交（同一缓存签名 + 同一请求参数）返回既有快照，不生成第二份。
+    """
+    snapshot, message, cache_hit = service.query(entry_id, payload.values)
+    if snapshot is None:
+        return {"ok": False, "message": message, "cache_hit": False, "snapshot": None}
+    return {"ok": True, "message": message, "cache_hit": cache_hit, "snapshot": snapshot}
